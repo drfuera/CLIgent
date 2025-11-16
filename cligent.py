@@ -20,6 +20,16 @@ Usage:
     python cligent.py [prompt]
     or
     ./cligent.py [prompt]
+
+Comment:
+	AI is lovely; But nobody loves like Jesus.
+	All glory to the one true God, full of patience and mercy.
+
+	Matt. 5:3
+	Blessed are the poor in spirit: for theirs is the kingdom of heaven.
+
+	Rom. 10:13
+	For whosoever shall call upon the name of the Lord shall be saved.
 """
 
 import json
@@ -36,6 +46,22 @@ import tty
 from datetime import datetime
 
 import requests
+
+
+def extract_json_from_markdown(text):
+    """Extract JSON content from markdown code blocks"""
+    # Look for JSON code blocks first - match the entire content between ```json and ```
+    json_match = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
+    if json_match:
+        return json_match.group(1).strip()
+
+    # If no JSON code block found, try to extract any code block content
+    code_match = re.search(r"```.*?\n(.*?)\n```", text, re.DOTALL)
+    if code_match:
+        return code_match.group(1).strip()
+
+    # If no code blocks found, return original text
+    return text
 
 
 def clean_markdown_formatting(text):
@@ -66,17 +92,9 @@ def clean_markdown_formatting(text):
 # Configuration
 API_KEY = ""
 API_URL = ""
-# Model configurations for each provider
-DEEPSEEK_MODELS = ["deepseek-chat", "deepseek-reasoner"]
-OPENAI_MODELS = ["gpt-4o", "gpt-4", "gpt-3.5-turbo"]
-ANTHROPIC_MODELS = ["claude-3-opus", "claude-3-sonnet", "claude-3-haiku"]
+# Model configurations will be loaded from config.json
 
-# Provider API endpoints
-PROVIDER_ENDPOINTS = {
-    "DeepSeek": "https://api.deepseek.com/v1/chat/completions",
-    "ChatGPT": "https://api.openai.com/v1/chat/completions",
-    "Claude": "https://api.anthropic.com/v1/messages",
-}
+# Provider API endpoints will be loaded from config.json
 
 # Current model configuration
 AGENT_MODEL = "deepseek-chat"
@@ -84,8 +102,11 @@ CURRENT_PROVIDER = "DeepSeek"  # Track which provider is active
 AGENT_MODE = "WORK"  # "ASK" or "WORK"
 TEMPERATURE = 0.0
 
+# Model selector state
+SELECTED_MODEL_INDEX = 0
+MODEL_SELECTOR_ACTIVE = False
+
 # State
-total_tokens = 0
 history_blocks = []
 stop_requested = False
 HISTORY_VIEWER_ACTIVE = False
@@ -111,6 +132,8 @@ class Color:
     BG_SELECTED = "\033[48;5;24m"  # Dark blue background for selected items
     BG_HISTORY_VIEWER = "\033[48;5;235m"  # Dark gray background for history viewer
     FG_GRAY = "\033[38;5;240m"  # Gray text for disabled items
+    BG_ASK = "\033[48;5;34m"  # Light green background for ASK mode
+    BG_WORK = "\033[48;5;124m"  # Red background for WORK mode
 
 
 def show_history_viewer():
@@ -191,21 +214,28 @@ def show_history_viewer():
         # Calculate column widths
         max_tokens_width = 8
         max_date_width = 13
-        # Calculate exact width accounting for borders (4 vertical lines + 2 corners = 6 chars)
+        max_mode_width = 6
+        max_model_width = 17
+        # Calculate exact width accounting for borders (6 vertical lines + 2 corners = 8 chars)
         available_width = (
-            terminal_width - max_tokens_width - max_date_width - 5
-        )  # 5 for borders (││││ + ┌┐)
+            terminal_width
+            - max_tokens_width
+            - max_date_width
+            - max_mode_width
+            - max_model_width
+            - 7
+        )  # 7 for borders (││││││ + ┌┐)
         user_prompt_width = available_width // 2
         summary_width = available_width - user_prompt_width  # Use remaining width
 
         # Table header
-        header_line = f"┌{'─' * max_tokens_width}┬{'─' * max_date_width}┬{'─' * user_prompt_width}┬{'─' * summary_width}┐"
+        header_line = f"┌{'─' * max_tokens_width}┬{'─' * max_date_width}┬{'─' * max_mode_width}┬{'─' * max_model_width}┬{'─' * user_prompt_width}┬{'─' * summary_width}┐"
         print(header_line)
 
-        header_row = f"│{'Tokens'.center(max_tokens_width)}│{' Date/Time '.center(max_date_width)}│{' User Prompt '.center(user_prompt_width)}│{' Summary '.center(summary_width)}│"
+        header_row = f"│{' Tokens '.center(max_tokens_width)}│{' Date/Time '.center(max_date_width)}│{' Mode '.center(max_mode_width)}│{' Model '.center(max_model_width)}│{' User Prompt '.center(user_prompt_width)}│{' Summary '.center(summary_width)}│"
         print(header_row)
 
-        separator_line = f"├{'─' * max_tokens_width}┼{'─' * max_date_width}┼{'─' * user_prompt_width}┼{'─' * summary_width}┤"
+        separator_line = f"├{'─' * max_tokens_width}┼{'─' * max_date_width}┼{'─' * max_mode_width}┼{'─' * max_model_width}┼{'─' * user_prompt_width}┼{'─' * summary_width}┤"
         print(separator_line)
 
         # Table rows
@@ -241,22 +271,39 @@ def show_history_viewer():
             )
 
             # Apply selection background
+            # Get mode and model
+            mode = block.get("mode", "UNKNOWN")
+            model = block.get("model", "UNKNOWN")
+
+            # Truncate model name if too long
+            model_display = (
+                " " + model[: max_model_width - 4] + ".. "
+                if len(model) > max_model_width - 2
+                else " " + model + " "
+            )
+
+            mode_display = " " + mode + " "
+
             if i == SELECTED_HISTORY_INDEX:
-                tokens_cell = f"{Color.BG_SELECTED}{str(token_cost).center(max_tokens_width)}{Color.RESET}"
+                tokens_cell = f"{Color.BG_SELECTED}{(' ' + str(token_cost) + ' ').center(max_tokens_width)}{Color.RESET}"
                 date_cell = f"{Color.BG_SELECTED}{date_display.center(max_date_width)}{Color.RESET}"
+                mode_cell = f"{Color.BG_SELECTED}{mode_display.center(max_mode_width)}{Color.RESET}"
+                model_cell = f"{Color.BG_SELECTED}{model_display.center(max_model_width)}{Color.RESET}"
                 user_cell = f"{Color.BG_SELECTED}{user_display.ljust(user_prompt_width)}{Color.RESET}"
                 summary_cell = f"{Color.BG_SELECTED}{summary_display.ljust(summary_width)}{Color.RESET}"
             else:
-                tokens_cell = str(token_cost).center(max_tokens_width)
+                tokens_cell = (" " + str(token_cost) + " ").center(max_tokens_width)
                 date_cell = date_display.center(max_date_width)
+                mode_cell = mode_display.center(max_mode_width)
+                model_cell = model_display.center(max_model_width)
                 user_cell = user_display.ljust(user_prompt_width)
                 summary_cell = summary_display.ljust(summary_width)
 
-            row = f"│{tokens_cell}│{date_cell}│{user_cell}│{summary_cell}│"
+            row = f"│{tokens_cell}│{date_cell}│{mode_cell}│{model_cell}│{user_cell}│{summary_cell}│"
             print(row)
 
         # Table footer
-        footer_line = f"└{'─' * max_tokens_width}┴{'─' * max_date_width}┴{'─' * user_prompt_width}┴{'─' * summary_width}┘"
+        footer_line = f"└{'─' * max_tokens_width}┴{'─' * max_date_width}┴{'─' * max_mode_width}┴{'─' * max_model_width}┴{'─' * user_prompt_width}┴{'─' * summary_width}┘"
         print(footer_line)
         print()
 
@@ -304,18 +351,18 @@ def display_history_viewer_status():
 System context:
 
 Provide a comprehensive answer to the user's question. Be detailed and helpful.
-Respond in the same language as the user.
+VERY IMPORTANT! You MUST respond in the same language as the User prompt.
 
 Use this format:
 {
-    "type": "answer",
+            "type": "answer",
     "message": "Your detailed answer to the user's question"
 }"""
     else:  # WORK mode
         base_prompt = """You are a SYSTEM AGENT.
 System:
 User prompt:
-Respond in the same language as the user.
+VERY IMPORTANT! You MUST respond in the same language as the User prompt.
 
 Evaluate if this is a QUESTION or a TASK.
 - Question: User wants information (max 5 commands to gather info)
@@ -323,17 +370,17 @@ Evaluate if this is a QUESTION or a TASK.
 
 If the user is asking about our previous conversation (what we discussed before, previous questions, etc.), you can answer directly using the conversation history above without running commands. Use this format:
 {
-    "type": "direct",
+            "type": "direct",
     "message": "Your direct answer using the conversation history"
 }
 
 For QUESTION:
 {
-    "type": "query",
+            "type": "query",
     "message": "Brief description of what you WILL DO to answer (not the answer itself!)",
     "run": [
         {
-            "message": "Why we're running this command",
+                "message": "Why we're running this command",
             "command": "the command",
             "confirm": false
         }
@@ -342,11 +389,11 @@ For QUESTION:
 
 For TASK:
 {
-    "type": "task",
+            "type": "task",
     "message": "Brief summary of the task plan",
     "run": [
         {
-            "message": "What this step does",
+                "message": "What this step does",
             "command": "the command",
             "confirm": false
         }
@@ -381,18 +428,40 @@ IMPORTANT:
     # Status bar
     print("_" * terminal_width)
     model_display = AGENT_MODEL
-    status_text = f"🤖 AGENT [{model_display.upper()}]: CTRL+T     MODE [{AGENT_MODE}]: CTRL+P     HISTORY [{len(history_blocks)}]: CTRL+H     TOKENS USED [{total_tokens}]     TOKEN PROMPT [{prompt_tokens}]     QUIT: CTRL+C     PROVIDERS: CTRL+W"
+    # Apply different background colors for ASK and WORK modes
+    mode_display = AGENT_MODE
+    if AGENT_MODE == "ASK":
+        mode_display = f"{Color.BG_ASK}{AGENT_MODE}{Color.BG_DARK_GREEN}"
+    elif AGENT_MODE == "WORK":
+        mode_display = f"{Color.BG_WORK}{AGENT_MODE}{Color.BG_DARK_GREEN}"
+
+    # Build status text with adaptive content based on terminal width
+    if terminal_width >= 150:
+        # Full status for very wide terminals
+        status_text = f"🤖 AGENT [{model_display.upper()}]: CTRL+T     PROVIDER: CTRL+W     MODE [{mode_display}]: CTRL+P     HISTORY [{len(history_blocks)}]: CTRL+H     QUIT: CTRL+C"
+    elif terminal_width >= 120:
+        # Wide status - remove some token details
+        status_text = f"🤖 AGENT [{model_display.upper()}]: CTRL+T     PROVIDER: CTRL+W     MODE [{mode_display}]: CTRL+P     HISTORY [{len(history_blocks)}]: CTRL+H     QUIT: CTRL+C"
+    elif terminal_width >= 100:
+        # Medium status - remove token details
+        status_text = f"🤖 AGENT [{model_display.upper()}]: T     PROVIDER: W     MODE [{mode_display}]: P     HISTORY [{len(history_blocks)}]: H     QUIT: C"
+    elif terminal_width >= 80:
+        # Compact status - keep only essential info
+        status_text = f"🤖 AGENT [{model_display.upper()}]: T     MODE [{mode_display}]: P     HISTORY [{len(history_blocks)}]: H     QUIT: C"
+    else:
+        # Minimal status for very narrow terminals
+        status_text = f"🤖 AGENT [{model_display.upper()}]: T     MODE [{mode_display}]: P     QUIT: C"
+
     # Fill the rest of the line with background color (subtract 1 to avoid wrapping)
-    padding = " " * (terminal_width - len(status_text) - 1)
+    padding = " " * (terminal_width - visual_length(status_text) - 1)
     print(f"{Color.BG_DARK_GREEN}{status_text}{padding}{Color.RESET}")
     sys.stdout.write("‾" * terminal_width + "\n")
     sys.stdout.flush()
 
 
 def show_providers_viewer():
-    """Display providers in a table with selection and toggle functionality"""
+    """Display providers viewer"""
     global SELECTED_PROVIDER_INDEX, PROVIDERS_VIEWER_ACTIVE
-
     while PROVIDERS_VIEWER_ACTIVE:
         clear_screen()
         terminal_width = get_terminal_width()
@@ -401,6 +470,10 @@ def show_providers_viewer():
         config = load_provider_config()
         providers = config.get("providers", {})
         provider_names = ["DeepSeek", "ChatGPT", "Claude"]
+
+        # Info box
+        info_text = "PROVIDERS MANAGER"
+        controls_text = "↑↓: navigate • ENTER: toggle • SPACE: models • BACKSPACE: exit"
 
         # Info box
         info_text = "PROVIDERS MANAGER"
@@ -553,11 +626,37 @@ def show_providers_viewer():
 
             if has_api_key:
                 # Update API configuration when exiting providers viewer
-                global API_URL, API_KEY
-                API_URL = PROVIDER_ENDPOINTS.get(
-                    CURRENT_PROVIDER, "https://api.deepseek.com/v1/chat/completions"
-                )
-                API_KEY = providers.get(CURRENT_PROVIDER, {}).get("api_key", "")
+                global API_URL, API_KEY, CURRENT_PROVIDER, AGENT_MODEL
+                config = load_provider_config()
+
+                # Find the enabled provider
+                enabled_providers = [
+                    name
+                    for name, config in providers.items()
+                    if config.get("enabled", False)
+                ]
+                if enabled_providers:
+                    CURRENT_PROVIDER = enabled_providers[0]
+                    provider_config = providers.get(CURRENT_PROVIDER, {})
+
+                    # Set AGENT_MODEL to first available model from the provider
+                    models = provider_config.get("models", [])
+                    if models:
+                        # Use first enabled model, not just first model in list
+                        disabled_models = provider_config.get("disabled_models", [])
+                        enabled_models = [m for m in models if m not in disabled_models]
+                        if enabled_models:
+                            AGENT_MODEL = enabled_models[0]
+                        else:
+                            # Fallback to first model if all are disabled (shouldn't happen due to validation)
+                            AGENT_MODEL = models[0]
+                    else:
+                        # No models available for this provider
+                        AGENT_MODEL = "unknown-model"
+
+                provider_config = config.get("providers", {}).get(CURRENT_PROVIDER, {})
+                API_URL = provider_config.get("endpoint", "")
+                API_KEY = provider_config.get("api_key", "")
                 PROVIDERS_VIEWER_ACTIVE = False
                 break
             else:
@@ -574,6 +673,18 @@ def show_providers_viewer():
             SELECTED_PROVIDER_INDEX = min(
                 len(provider_names) - 1, SELECTED_PROVIDER_INDEX + 1
             )
+        elif ch == " ":  # SPACE - Open model selector
+            selected_provider = provider_names[SELECTED_PROVIDER_INDEX]
+            provider_config = providers.get(
+                selected_provider, {"enabled": False, "api_key": "", "models": []}
+            )
+
+            # Check if provider has models and is enabled
+            if provider_config.get("enabled", False) and provider_config.get("models"):
+                show_model_selector(selected_provider, provider_config, config)
+                # Reload config after model selector
+                config = load_provider_config()
+                providers = config.get("providers", {})
         elif ch == "\r" or ch == "\n":  # ENTER
             selected_provider = provider_names[SELECTED_PROVIDER_INDEX]
             provider_config = providers.get(
@@ -581,11 +692,28 @@ def show_providers_viewer():
             )
 
             if provider_config.get("enabled", False):
-                # Disable provider
-                provider_config["enabled"] = False
-                providers[selected_provider] = provider_config
-                config["providers"] = providers
-                save_provider_config(config)
+                # Disable provider - check if this is the only enabled provider
+                enabled_providers = [
+                    name
+                    for name in provider_names
+                    if providers.get(name, {}).get("enabled", False)
+                ]
+                if (
+                    len(enabled_providers) == 1
+                    and enabled_providers[0] == selected_provider
+                ):
+                    # This is the only enabled provider, cannot disable it
+                    clear_screen()
+                    print("Cannot disable the only enabled provider.")
+                    print("You must enable another provider first.")
+                    print("Press any key to continue...")
+                    read_char()
+                else:
+                    # Disable this provider
+                    provider_config["enabled"] = False
+                    providers[selected_provider] = provider_config
+                    config["providers"] = providers
+                    save_provider_config(config)
             else:
                 # Enable provider - always show prompt but use existing key if blank
                 clear_screen()
@@ -600,14 +728,61 @@ def show_providers_viewer():
                 api_key = input().strip()
 
                 if api_key:
-                    # Use new API key
+                    # Use new API key - disable all other providers first
+                    for provider_name in provider_names:
+                        if provider_name != selected_provider:
+                            other_provider_config = providers.get(
+                                provider_name, {"enabled": False, "api_key": ""}
+                            )
+                            other_provider_config["enabled"] = False
+                            providers[provider_name] = other_provider_config
+
+                    # Fetch available models from the provider
+                    print(f"Fetching available models from {selected_provider}...")
+                    endpoint = provider_config.get("endpoint", "")
+                    models = fetch_provider_models(selected_provider, api_key, endpoint)
+
                     provider_config["enabled"] = True
                     provider_config["api_key"] = api_key
+                    provider_config["models"] = models
                     providers[selected_provider] = provider_config
                     config["providers"] = providers
                     save_provider_config(config)
+
+                    if models:
+                        print(f"Found {len(models)} models: {', '.join(models)}")
+                    else:
+                        print("No models found or failed to fetch models")
+                    print("Press any key to continue...")
+                    read_char()
                 elif existing_api_key:
-                    # Use existing API key
+                    # Use existing API key - disable all other providers first
+                    for provider_name in provider_names:
+                        if provider_name != selected_provider:
+                            other_provider_config = providers.get(
+                                provider_name, {"enabled": False, "api_key": ""}
+                            )
+                            other_provider_config["enabled"] = False
+                            providers[provider_name] = other_provider_config
+
+                    # Fetch available models from the provider if not already fetched
+                    if not provider_config.get("models"):
+                        print(f"Fetching available models from {selected_provider}...")
+                        endpoint = provider_config.get("endpoint", "")
+                        models = fetch_provider_models(
+                            selected_provider, existing_api_key, endpoint
+                        )
+                        provider_config["models"] = models
+
+                        if models:
+                            print(
+                                f"Found {len(models)} models: {', '.join(models.keys())}"
+                            )
+                        else:
+                            print("No models found or failed to fetch models")
+                        print("Press any key to continue...")
+                        read_char()
+
                     provider_config["enabled"] = True
                     providers[selected_provider] = provider_config
                     config["providers"] = providers
@@ -620,7 +795,9 @@ def show_providers_viewer():
 
 def log(text):
     """Write text to session.log"""
-    with open("session.log", "a", encoding="utf-8") as f:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    log_path = os.path.join(script_dir, "session.log")
+    with open(log_path, "a", encoding="utf-8") as f:
         f.write(text + "\n")
 
 
@@ -633,7 +810,9 @@ def log_print(*args, **kwargs):
     printed_text = output.getvalue()
 
     # Log the printed text
-    with open("session.log", "a", encoding="utf-8") as f:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    log_path = os.path.join(script_dir, "session.log")
+    with open(log_path, "a", encoding="utf-8") as f:
         f.write(printed_text)
 
     # Call the original print
@@ -643,7 +822,9 @@ def log_print(*args, **kwargs):
 def read_session_log():
     """Read and return the content of session.log"""
     try:
-        with open("session.log", "r", encoding="utf-8") as f:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        log_path = os.path.join(script_dir, "session.log")
+        with open(log_path, "r", encoding="utf-8") as f:
             return f.read()
     except FileNotFoundError:
         return ""
@@ -651,7 +832,9 @@ def read_session_log():
 
 def clear_session_log():
     """Clear the session.log file"""
-    open("session.log", "w", encoding="utf-8").close()
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    log_path = os.path.join(script_dir, "session.log")
+    open(log_path, "w", encoding="utf-8").close()
 
 
 def strip_ansi_codes(text):
@@ -667,6 +850,16 @@ def strip_ansi_codes(text):
     cleaned = cleaned.strip()
 
     return cleaned
+
+
+def visual_length(text):
+    """Calculate the visible length of text, excluding ANSI escape codes"""
+    import re
+
+    # Remove ANSI escape sequences (colors, formatting)
+    ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+    cleaned = ansi_escape.sub("", text)
+    return len(cleaned)
 
 
 def clear_screen():
@@ -696,47 +889,528 @@ def get_system_info():
         return "OS: Unknown"
 
 
+def migrate_config_to_new_structure(config):
+    """Migrate old config structure to new model configuration structure"""
+    if "providers" not in config:
+        return config
+
+    providers = config["providers"]
+
+    for provider_name, provider_config in providers.items():
+        # Skip if already in new structure
+        if "models" in provider_config and isinstance(provider_config["models"], dict):
+            continue
+
+        # Convert old structure to new
+        old_models = provider_config.get("models", [])
+        old_disabled_models = provider_config.get("disabled_models", [])
+
+        new_models = {}
+
+        # Add all models from old list with proper configuration
+        for model_name in old_models:
+            is_enabled = model_name not in old_disabled_models
+
+            # Get known configuration or use defaults
+            default_config = get_default_model_config(provider_name, model_name)
+            max_tokens = default_config.get("max_tokens", 4096)
+
+            new_models[model_name] = {
+                "enabled": is_enabled,
+                "max_tokens": max_tokens,
+            }
+
+        # Add default configuration for unknown models
+        if new_models:
+            new_models["default"] = {
+                "enabled": False,
+                "max_tokens": 4096,
+            }
+
+        # Update provider config
+        provider_config["models"] = new_models
+
+        # Remove old fields
+        if "disabled_models" in provider_config:
+            del provider_config["disabled_models"]
+
+    return config
+
+
+def get_default_model_config(provider_name, model_name):
+    """Get default model configuration from known_models"""
+    known_models = {
+        "DeepSeek": {
+            "deepseek-chat": {"max_tokens": 8096},
+            "deepseek-reasoner": {"max_tokens": 64768},
+        },
+        "ChatGPT": {
+            "gpt-3.5-turbo": {"max_tokens": 4096},
+            "gpt-3.5-turbo-16k": {"max_tokens": 4096},
+            "gpt-4": {"max_tokens": 4096},
+            "gpt-4-turbo": {"max_tokens": 4096},
+            "gpt-4o": {"max_tokens": 4096},
+            "gpt-4.1": {"max_tokens": 32768},
+            "gpt-4.1-mini": {"max_tokens": 32768},
+            "gpt-4.1-nano": {"max_tokens": 32768},
+            "o1": {"max_tokens": 100000},
+            "o1-pro": {"max_tokens": 100000},
+            "o3": {"max_tokens": 100000},
+            "o3-mini": {"max_tokens": 100000},
+            "o4-mini": {"max_tokens": 100000},
+        },
+        "Claude": {
+            "claude-sonnet-4-5-20250929": {"max_tokens": 64000},
+            "claude-sonnet-4-20250514": {"max_tokens": 64000},
+            "claude-opus-4-1-20250805": {"max_tokens": 32000},
+            "claude-opus-4-20250514": {"max_tokens": 32000},
+            "claude-haiku-4-5-20251001": {"max_tokens": 16384},
+            "claude-3-5-haiku-20241022": {"max_tokens": 8192},
+            "claude-3-haiku-20240307": {"max_tokens": 4096},
+        },
+    }
+
+    provider_models = known_models.get(provider_name, {})
+    model_config = provider_models.get(model_name, {})
+    return {"enabled": True, "max_tokens": model_config.get("max_tokens", 4096)}
+
+
 def load_provider_config():
     """Load provider configuration from config.json"""
     try:
-        if os.path.exists("config.json"):
-            with open("config.json", "r") as f:
-                return json.load(f)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        config_path = os.path.join(script_dir, "config.json")
+        if os.path.exists(config_path):
+            with open(config_path, "r") as f:
+                config = json.load(f)
+                # Migrate to new structure if needed
+                return migrate_config_to_new_structure(config)
         else:
             # Return default config if file doesn't exist
             return {
                 "providers": {
-                    "DeepSeek": {"enabled": False, "api_key": ""},
-                    "ChatGPT": {"enabled": False, "api_key": ""},
-                    "Claude": {"enabled": False, "api_key": ""},
+                    "DeepSeek": {
+                        "enabled": False,
+                        "api_key": "",
+                        "endpoint": "https://api.deepseek.com/v1/chat/completions",
+                        "models": {
+                            "deepseek-chat": get_default_model_config(
+                                "DeepSeek", "deepseek-chat"
+                            ),
+                            "deepseek-reasoner": get_default_model_config(
+                                "DeepSeek", "deepseek-reasoner"
+                            ),
+                        },
+                    },
+                    "ChatGPT": {
+                        "enabled": False,
+                        "api_key": "",
+                        "endpoint": "https://api.openai.com/v1/chat/completions",
+                        "models": {},
+                    },
+                    "Claude": {
+                        "enabled": False,
+                        "api_key": "",
+                        "endpoint": "https://api.anthropic.com/v1/messages",
+                        "models": {},
+                    },
                 }
             }
     except:
         return {
             "providers": {
-                "DeepSeek": {"enabled": False, "api_key": ""},
-                "ChatGPT": {"enabled": False, "api_key": ""},
-                "Claude": {"enabled": False, "api_key": ""},
+                "DeepSeek": {
+                    "enabled": False,
+                    "api_key": "",
+                    "endpoint": "https://api.deepseek.com/v1/chat/completions",
+                    "models": {},
+                },
+                "ChatGPT": {
+                    "enabled": False,
+                    "api_key": "",
+                    "endpoint": "https://api.openai.com/v1/chat/completions",
+                    "models": {},
+                    "disabled_models": [],
+                },
+                "Claude": {
+                    "enabled": False,
+                    "api_key": "",
+                    "endpoint": "https://api.anthropic.com/v1/messages",
+                    "models": {},
+                    "disabled_models": [],
+                },
             }
         }
 
 
 def save_provider_config(config):
-    """Save provider configuration to config.json"""
     try:
-        with open("config.json", "w") as f:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        config_path = os.path.join(script_dir, "config.json")
+        with open(config_path, "w") as f:
             json.dump(config, f, indent=2)
     except:
         pass
 
 
-def load_state():
-    global total_tokens, AGENT_MODEL, AGENT_MODE, history_blocks, CURRENT_PROVIDER
+def get_model_max_tokens(provider_name, model_name):
+    """Get max_tokens configuration for a specific model"""
+    config = load_provider_config()
+    providers = config.get("providers", {})
+    provider_config = providers.get(provider_name, {})
+    models_config = provider_config.get("models", {})
+
+    # Try to get the specific model config
+    model_config = models_config.get(model_name)
+    if model_config and "max_tokens" in model_config:
+        return model_config["max_tokens"]
+
+    # Try to get default config for the provider
+    default_config = models_config.get("default")
+    if default_config and "max_tokens" in default_config:
+        return default_config["max_tokens"]
+
+    # Fallback to global default
+    return 4096
+
+
+def fetch_provider_models(provider_name, api_key, endpoint):
+    """Fetch available models from provider API"""
     try:
-        if os.path.exists("session.json"):
-            with open("session.json", "r") as f:
+        import json as json_module
+        import urllib.request
+
+        # Use the provided endpoint to construct the models API URL
+        # Convert chat completions endpoint to models endpoint
+        if endpoint:
+            # Convert from chat completions endpoint to models endpoint
+            if "/chat/completions" in endpoint:
+                url = endpoint.replace("/chat/completions", "/models")
+            elif "/v1/messages" in endpoint:
+                url = endpoint.replace("/v1/messages", "/v1/models")
+            else:
+                # Fallback: try to construct models URL from base endpoint
+                url = endpoint.rstrip("/") + "/models"
+        else:
+            return []
+
+        # Define headers for each provider
+        if provider_name == "DeepSeek":
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+        elif provider_name == "ChatGPT":
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+        elif provider_name == "Claude":
+            headers = {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            }
+        else:
+            return []
+
+        # Make the API request
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json_module.loads(response.read().decode("utf-8"))
+
+            # Parse models based on provider response format
+            # Extract model names based on provider
+            if provider_name == "DeepSeek":
+                model_names = [model["id"] for model in data.get("data", [])]
+            elif provider_name == "ChatGPT":
+                model_names = [model["id"] for model in data.get("data", [])]
+            elif provider_name == "Claude":
+                model_names = [model["id"] for model in data.get("data", [])]
+            else:
+                model_names = []
+
+            # Convert to new model structure with default values
+            models = {}
+            for model_name in model_names:
+                models[model_name] = get_default_model_config(provider_name, model_name)
+
+            return models
+
+    except Exception as e:
+        print(f"Error fetching models from {provider_name}: {e}")
+        return []
+
+
+def show_model_selector(provider_name, provider_config, config):
+    """Display model selector for a provider with fixed 20-row height"""
+    global SELECTED_MODEL_INDEX, MODEL_SELECTOR_ACTIVE, AGENT_MODEL, CURRENT_PROVIDER
+    MODEL_SELECTOR_ACTIVE = True
+    SELECTED_MODEL_INDEX = 0
+    scroll_offset = 0
+
+    # Get models and their disabled status from new structure
+    models_config = provider_config.get("models", {})
+    models = list(models_config.keys())
+    disabled_models = [
+        model_name
+        for model_name, config in models_config.items()
+        if not config.get("enabled", True)
+    ]
+
+    # Check if current AGENT_MODEL is disabled and switch if needed
+    if CURRENT_PROVIDER == provider_name and AGENT_MODEL in disabled_models:
+        # Current model is disabled, switch to first available model
+        enabled_models = [m for m in models if m not in disabled_models]
+        if enabled_models:
+            AGENT_MODEL = enabled_models[0]
+
+    while MODEL_SELECTOR_ACTIVE:
+        clear_screen()
+        terminal_width = get_terminal_width()
+
+        # Info box
+        info_text = f"MODEL SELECTOR - {provider_name}"
+        controls_text = "↑↓: navigate • SPACE: toggle • BACKSPACE: back"
+
+        # Calculate box width (use the wider of the two texts + padding)
+        box_width = max(len(info_text), len(controls_text)) + 4
+        padding_left = (terminal_width - box_width) // 2
+
+        # Top border
+        print(
+            " " * padding_left
+            + f"{Color.BG_HISTORY_VIEWER}┌{'─' * (box_width - 2)}┐{Color.RESET}"
+        )
+
+        # Info line (centered)
+        info_padding = (box_width - 2 - len(info_text)) // 2
+        print(
+            " " * padding_left
+            + f"{Color.BG_HISTORY_VIEWER}│{' ' * info_padding}{info_text}{' ' * (box_width - 2 - len(info_text) - info_padding)}│{Color.RESET}"
+        )
+
+        # Separator
+        print(
+            " " * padding_left
+            + f"{Color.BG_HISTORY_VIEWER}├{'─' * (box_width - 2)}┤{Color.RESET}"
+        )
+
+        # Controls line (centered)
+        controls_padding = (box_width - 2 - len(controls_text)) // 2
+        print(
+            " " * padding_left
+            + f"{Color.BG_HISTORY_VIEWER}│{' ' * controls_padding}{controls_text}{' ' * (box_width - 2 - len(controls_text) - controls_padding)}│{Color.RESET}"
+        )
+
+        # Bottom border
+        print(
+            " " * padding_left
+            + f"{Color.BG_HISTORY_VIEWER}└{'─' * (box_width - 2)}┘{Color.RESET}"
+        )
+        print()
+
+        if not models:
+            print("No models available for this provider.")
+            print("Press any key to continue...")
+            read_char()
+            break
+
+        # Fixed table height - 20 rows max
+        max_visible_rows = 20
+        total_rows = len(models)
+
+        # Calculate scroll boundaries
+        if SELECTED_MODEL_INDEX < scroll_offset:
+            scroll_offset = SELECTED_MODEL_INDEX
+        elif SELECTED_MODEL_INDEX >= scroll_offset + max_visible_rows:
+            scroll_offset = SELECTED_MODEL_INDEX - max_visible_rows + 1
+
+        # Calculate visible range
+        start_idx = scroll_offset
+        end_idx = min(start_idx + max_visible_rows, total_rows)
+        visible_models = models[start_idx:end_idx]
+
+        # Table header
+        max_model_width = min(40, terminal_width - 30)
+        max_token_width = 12
+        table_width = max_model_width + 12 + max_token_width + 3
+        table_padding = (terminal_width - table_width) // 2
+
+        header_line = (
+            " " * table_padding
+            + f"┌{'─' * max_model_width}┬{'─' * 12}┬{'─' * max_token_width}┐"
+        )
+        print(header_line)
+
+        header_row = (
+            " " * table_padding
+            + f"│{'Model Name'.center(max_model_width)}│{' Status '.center(12)}│{'Max Token'.center(max_token_width)}│"
+        )
+        print(header_row)
+
+        separator_line = (
+            " " * table_padding
+            + f"├{'─' * max_model_width}┼{'─' * 12}┼{'─' * max_token_width}┤"
+        )
+        print(separator_line)
+
+        # Table rows for visible models only
+        for i, model_name in enumerate(visible_models):
+            global_idx = start_idx + i
+            is_disabled = model_name in disabled_models
+            status_text = "DISABLED" if is_disabled else "ENABLED"
+
+            # Get model config for additional info
+            model_config = models_config.get(model_name, {})
+            max_tokens = model_config.get("max_tokens", 4096)
+
+            # Truncate model name if too long
+            display_name = model_name
+            if len(display_name) > max_model_width - 2:
+                display_name = display_name[: max_model_width - 5] + "..."
+
+            # Apply selection background and status color
+            if global_idx == SELECTED_MODEL_INDEX:
+                model_cell = f"{Color.BG_SELECTED} {display_name.ljust(max_model_width - 1)}{Color.RESET}"
+                if is_disabled:
+                    status_cell = f"{Color.BG_SELECTED}{Color.FG_GRAY}{status_text.center(12)}{Color.RESET}"
+                else:
+                    status_cell = f"{Color.BG_SELECTED}{Color.GREEN}{status_text.center(12)}{Color.RESET}"
+            else:
+                model_cell = f" {display_name.ljust(max_model_width - 1)}"
+                if is_disabled:
+                    status_cell = (
+                        f"{Color.FG_GRAY}{status_text.center(12)}{Color.RESET}"
+                    )
+                else:
+                    status_cell = f"{Color.GREEN}{status_text.center(12)}{Color.RESET}"
+
+            # Format max_tokens cell
+            max_token_cell = f"{max_tokens}".center(max_token_width)
+            if global_idx == SELECTED_MODEL_INDEX:
+                max_token_cell = f"{Color.BG_SELECTED}{max_token_cell}{Color.RESET}"
+
+            row = " " * table_padding + f"│{model_cell}│{status_cell}│{max_token_cell}│"
+            print(row)
+
+        # Table footer
+        footer_line = (
+            " " * table_padding
+            + f"└{'─' * max_model_width}┴{'─' * 12}┴{'─' * max_token_width}┘"
+        )
+        print(footer_line)
+
+        # Show scroll indicator if needed
+        if total_rows > max_visible_rows:
+            scroll_info = f"Showing {start_idx + 1}-{end_idx} of {total_rows} models"
+            print(f"{scroll_info.center(terminal_width)}")
+
+        # Show current model info
+        current_model_config = models_config.get(AGENT_MODEL, {})
+        current_max_tokens = current_model_config.get("max_tokens", 4096)
+        current_info = f"Current: {AGENT_MODEL} (max_tokens: {current_max_tokens})"
+        print(f"{current_info.center(terminal_width)}")
+
+        print()
+
+        # Handle input
+        ch = read_char()
+        if ch == "\x7f" or ch == "\x08":  # BACKSPACE
+            # Set AGENT_MODEL to the currently selected model when leaving, but only if it's enabled
+            if 0 <= SELECTED_MODEL_INDEX < len(models):
+                selected_model = models[SELECTED_MODEL_INDEX]
+                if (
+                    selected_model not in disabled_models
+                    and CURRENT_PROVIDER == provider_name
+                ):
+                    AGENT_MODEL = selected_model
+                else:
+                    # If selected model is disabled, find first enabled model
+                    enabled_models = [m for m in models if m not in disabled_models]
+                    if enabled_models:
+                        AGENT_MODEL = enabled_models[0]
+
+            # Force save to ensure config is updated
+            provider_config["disabled_models"] = disabled_models
+            config["providers"][provider_name] = provider_config
+            save_provider_config(config)
+
+            MODEL_SELECTOR_ACTIVE = False
+
+            # Force screen refresh to update status bar with new AGENT_MODEL
+            clear_screen()
+            display_screen()
+            break
+        elif ch == "UP":  # Up arrow
+            SELECTED_MODEL_INDEX = max(0, SELECTED_MODEL_INDEX - 1)
+        elif ch == "DOWN":  # Down arrow
+            SELECTED_MODEL_INDEX = min(total_rows - 1, SELECTED_MODEL_INDEX + 1)
+        elif ch == " ":  # SPACE - Toggle model status
+            selected_model = models[SELECTED_MODEL_INDEX]
+
+            # Check if this would disable the last enabled model
+            enabled_count = len([m for m in models if m not in disabled_models])
+            if selected_model not in disabled_models and enabled_count <= 1:
+                # Cannot disable the last enabled model
+                print("Cannot disable the last enabled model.")
+                print("At least one model must remain enabled.")
+                print("Press any key to continue...")
+                read_char()
+            else:
+                if selected_model in disabled_models:
+                    disabled_models.remove(selected_model)
+                else:
+                    disabled_models.append(selected_model)
+        elif ch == "\r":  # ENTER - Edit max_tokens
+            selected_model = models[SELECTED_MODEL_INDEX]
+            current_config = models_config.get(selected_model, {})
+            current_max_tokens = current_config.get("max_tokens", 4096)
+
+            # Get default value from known_models
+            default_config = get_default_model_config(provider_name, selected_model)
+            default_max_tokens = default_config.get("max_tokens", 4096)
+
+            # Show current and default values clearly
+            print(f"Current max tokens: {current_max_tokens}")
+            print(f"Default max tokens: {default_max_tokens}")
+            user_input = input("SET MAX TOKENS> ").strip()
+
+            if user_input == "":
+                # Use default value from known_models if field is empty
+                new_max_tokens = default_max_tokens
+            else:
+                try:
+                    new_max_tokens = int(user_input)
+                except ValueError:
+                    print("Invalid input. Must be a number.")
+                    print("Press any key to continue...")
+                    read_char()
+                    continue
+
+            # Update the model configuration
+            if selected_model not in models_config:
+                models_config[selected_model] = {}
+            models_config[selected_model]["max_tokens"] = new_max_tokens
+
+            # Update provider config and save
+            provider_config["models"] = models_config
+            config["providers"][provider_name] = provider_config
+            save_provider_config(config)
+
+            print(f"Max tokens for {selected_model} set to {new_max_tokens}")
+            print("Press any key to continue...")
+            read_char()
+
+
+def load_state():
+    global AGENT_MODEL, AGENT_MODE, history_blocks, CURRENT_PROVIDER
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        session_path = os.path.join(script_dir, "session.json")
+        if os.path.exists(session_path):
+            with open(session_path, "r") as f:
                 data = json.load(f)
-                total_tokens = data.get("tokens", 0)
                 AGENT_MODEL = data.get("model", "deepseek-chat")
                 AGENT_MODE = data.get("mode", "WORK")
                 history_blocks = data.get("history_blocks", [])
@@ -747,14 +1421,15 @@ def load_state():
 
 def save_state():
     try:
-        with open("session.json", "w") as f:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        session_path = os.path.join(script_dir, "session.json")
+        with open(session_path, "w") as f:
             json.dump(
                 {
-                    "tokens": total_tokens,
                     "model": AGENT_MODEL,
                     "mode": AGENT_MODE,
-                    "history_blocks": history_blocks,
                     "provider": CURRENT_PROVIDER,
+                    "history_blocks": history_blocks,
                 },
                 f,
                 indent=2,
@@ -823,9 +1498,7 @@ def spinner_animation(stop_event):
     sys.stdout.flush()
 
 
-def call_deepseek(messages, terminal_history=None):
-    global total_tokens
-
+def call_api(messages, terminal_history=None):
     # Start spinner with proper stop event
     stop_event = threading.Event()
     spinner_thread = threading.Thread(target=spinner_animation, args=(stop_event,))
@@ -836,27 +1509,91 @@ def call_deepseek(messages, terminal_history=None):
 
         import requests
 
-        payload = {
-            "model": AGENT_MODEL,
-            "messages": messages,
-            "temperature": TEMPERATURE,
-        }
+        # Get max_tokens for the current model
+        max_tokens = get_model_max_tokens(CURRENT_PROVIDER, AGENT_MODEL)
 
-        # Add terminal history if provided
-        if terminal_history:
-            payload["history"] = terminal_history
+        # Completely separate handling for each provider
+        if CURRENT_PROVIDER == "DeepSeek":
+            # DeepSeek API call
+            payload = {
+                "model": AGENT_MODEL,
+                "messages": messages,
+                "temperature": TEMPERATURE,
+                "max_tokens": max_tokens,
+            }
 
-        req = urllib.request.Request(
-            API_URL,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
+            # Add terminal history if provided
+            if terminal_history:
+                payload["history"] = terminal_history
+
+            headers = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {API_KEY}",
-            },
-        )
+            }
 
-        with urllib.request.urlopen(req, timeout=None) as response:
-            result = json.loads(response.read().decode("utf-8"))
+            # Make actual DeepSeek API call
+            req = urllib.request.Request(
+                API_URL,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+            )
+
+            with urllib.request.urlopen(req, timeout=None) as response:
+                result = json.loads(response.read().decode("utf-8"))
+
+        elif CURRENT_PROVIDER == "ChatGPT":
+            # ChatGPT API call
+            payload = {
+                "model": AGENT_MODEL,
+                "messages": messages,
+                "temperature": TEMPERATURE,
+                "max_tokens": max_tokens,
+            }
+
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {API_KEY}",
+            }
+
+            # Make actual ChatGPT API call
+            req = urllib.request.Request(
+                API_URL,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+            )
+
+            with urllib.request.urlopen(req, timeout=None) as response:
+                result = json.loads(response.read().decode("utf-8"))
+
+        elif CURRENT_PROVIDER == "Claude":
+            # Claude API call - completely different structure
+            payload = {
+                "model": AGENT_MODEL,
+                "max_tokens": max_tokens,
+                "messages": messages,
+                "temperature": TEMPERATURE,
+            }
+
+            headers = {
+                "Content-Type": "application/json",
+                "x-api-key": API_KEY,
+                "anthropic-version": "2023-06-01",
+            }
+
+            # Make actual Claude API call
+            req = urllib.request.Request(
+                API_URL,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+            )
+
+            with urllib.request.urlopen(req, timeout=None) as response:
+                result = json.loads(response.read().decode("utf-8"))
+
+        else:
+            # Unknown provider - return error
+            log(f"{Color.RED}Unknown provider: {CURRENT_PROVIDER}{Color.RESET}")
+            return None
 
         # Stop spinner
         stop_event.set()
@@ -865,12 +1602,11 @@ def call_deepseek(messages, terminal_history=None):
         # Log the call
         log_api_call(payload, result)
 
-        # Update tokens
-        if "usage" in result:
-            total_tokens += result["usage"].get("total_tokens", 0)
-            save_state()
-
-        return result["choices"][0]["message"]["content"]
+        # Extract response content based on provider
+        if CURRENT_PROVIDER == "Claude":
+            return result["content"][0]["text"]
+        else:
+            return result["choices"][0]["message"]["content"]
 
     except Exception as e:
         stop_event.set()
@@ -949,18 +1685,18 @@ def display_screen():
 System context:
 
 Provide a comprehensive answer to the user's question. Be detailed and helpful.
-Respond in the same language as the user.
+VERY IMPORTANT! You MUST respond in the same language as the User prompt.
 
 Use this format:
 {
-    "type": "answer",
+            "type": "answer",
     "message": "Your detailed answer to the user's question"
 }"""
     else:  # WORK mode
         base_prompt = """You are a SYSTEM AGENT.
 System:
 User prompt:
-Respond in the same language as the user.
+VERY IMPORTANT! You MUST respond in the same language as the User prompt.
 
 Evaluate if this is a QUESTION or a TASK.
 - Question: User wants information (max 5 commands to gather info)
@@ -968,17 +1704,17 @@ Evaluate if this is a QUESTION or a TASK.
 
 If the user is asking about our previous conversation (what we discussed before, previous questions, etc.), you can answer directly using the conversation history above without running commands. Use this format:
 {
-    "type": "direct",
+            "type": "direct",
     "message": "Your direct answer using the conversation history"
 }
 
 For QUESTION:
 {
-    "type": "query",
+            "type": "query",
     "message": "Brief description of what you WILL DO to answer (not the answer itself!)",
     "run": [
         {
-            "message": "Why we're running this command",
+                "message": "Why we're running this command",
             "command": "the command",
             "confirm": false
         }
@@ -987,11 +1723,11 @@ For QUESTION:
 
 For TASK:
 {
-    "type": "task",
+            "type": "task",
     "message": "Brief summary of the task plan",
     "run": [
         {
-            "message": "What this step does",
+                "message": "What this step does",
             "command": "the command",
             "confirm": false
         }
@@ -1029,9 +1765,32 @@ IMPORTANT:
     # Print status bar with dynamic borders
     print(f"{Color.FG_LIGHTER_GREEN}_{Color.RESET}" * terminal_width)
     model_display = AGENT_MODEL
-    status_text = f"🤖 AGENT [{model_display.upper()}]: CTRL+T     MODE [{AGENT_MODE}]: CTRL+P     HISTORY [{len(history_blocks)}]: CTRL+H     TOKENS USED [{total_tokens}]     TOKEN PROMPT [{prompt_tokens}]     QUIT: CTRL+C     PROVIDERS: CTRL+W"
+    # Apply different background colors for ASK and WORK modes
+    mode_display = AGENT_MODE
+    if AGENT_MODE == "ASK":
+        mode_display = f"{Color.BG_ASK}{AGENT_MODE}{Color.BG_DARK_GREEN}"
+    elif AGENT_MODE == "WORK":
+        mode_display = f"{Color.BG_WORK}{AGENT_MODE}{Color.BG_DARK_GREEN}"
+
+    # Build status text with adaptive content based on terminal width
+    if terminal_width >= 150:
+        # Full status for very wide terminals
+        status_text = f"🤖 AGENT [{model_display.upper()}]: CTRL+T     PROVIDER: CTRL+W     MODE [{mode_display}]: CTRL+P     HISTORY [{len(history_blocks)}]: CTRL+H     QUIT: CTRL+C"
+    elif terminal_width >= 120:
+        # Wide status - remove some token details
+        status_text = f"🤖 AGENT [{model_display.upper()}]: CTRL+T     PROVIDER: CTRL+W     MODE [{mode_display}]: CTRL+P     HISTORY [{len(history_blocks)}]: CTRL+H     QUIT: CTRL+C"
+    elif terminal_width >= 100:
+        # Medium status - remove token details
+        status_text = f"🤖 AGENT [{model_display.upper()}]: T     PROVIDER: W     MODE [{mode_display}]: P     HISTORY [{len(history_blocks)}]: H     QUIT: C"
+    elif terminal_width >= 80:
+        # Compact status - keep only essential info
+        status_text = f"🤖 AGENT [{model_display.upper()}]: T     MODE [{mode_display}]: P     HISTORY [{len(history_blocks)}]: H     QUIT: C"
+    else:
+        # Minimal status for very narrow terminals
+        status_text = f"🤖 AGENT [{model_display.upper()}]: T     MODE [{mode_display}]: P     QUIT: C"
+
     # Fill the rest of the line with background color (subtract 1 to avoid wrapping)
-    padding = " " * (terminal_width - len(status_text) - 1)
+    padding = " " * (terminal_width - visual_length(status_text) - 1)
     print(f"{Color.BG_DARK_GREEN}{status_text}{padding}{Color.RESET}")
 
     # Print closing bar but use write instead of print to control newline
@@ -1144,12 +1903,12 @@ You ran these commands and got these results:
 
 Based on ALL the results above, provide a clear answer to the user's original question.
 Be concise and direct. Use 2-4 sentences maximum.
-Respond in the same language as the user.
+VERY IMPORTANT! You MUST respond in the same language as the User prompt.
 
 Use the command results above to provide your answer."""
 
     messages = [{"role": "user", "content": explain_prompt}]
-    response = call_deepseek(messages)
+    response = call_api(messages)
 
     return response if response else None
 
@@ -1188,7 +1947,7 @@ def handle_error_recursion(
     issue_prompt = f"""You are a SYSTEM AGENT.
 This is the system: {system_info}
 Your mission: {user_prompt}
-You will respond in the same language as the user.
+VERY IMPORTANT! You MUST respond in the same language as the User prompt.
 
 Planned commands to complete the mission:
 {planned_commands}
@@ -1219,7 +1978,7 @@ Respond ONLY with valid JSON:
 Use the terminal history and previous attempts above to understand the context."""
 
     messages = [{"role": "user", "content": issue_prompt}]
-    response = call_deepseek(messages)
+    response = call_api(messages)
 
     if not response or stop_requested:
         return False
@@ -1316,7 +2075,7 @@ User question: {user_prompt}
 
 {history_text}
 Provide a comprehensive answer to the user's question. Be detailed and helpful.
-Respond in the same language as the user.
+VERY IMPORTANT! You MUST respond in the same language as the User prompt.
 
 Use this format:
 {{
@@ -1327,7 +2086,7 @@ Use this format:
         main_prompt = f"""You are a SYSTEM AGENT.
 System: {system_info}
 User prompt: {user_prompt}
-Respond in the same language as the user.
+VERY IMPORTANT! You MUST respond in the same language as the User prompt.
 
 {history_text}
 Evaluate if this is a QUESTION or a TASK.
@@ -1367,15 +2126,16 @@ IMPORTANT:
 - Escape JSON properly"""
 
     messages = [{"role": "user", "content": main_prompt}]
-    response = call_deepseek(messages)
+    response = call_api(messages)
 
     if not response:
         log(f"{Color.RED}Failed to get AI response{Color.RESET}")
         return
 
-    # Parse JSON response
+    # Parse JSON response - first extract from markdown code blocks if needed
     try:
-        data = json.loads(response)
+        clean_response = extract_json_from_markdown(response)
+        data = json.loads(clean_response)
     except:
         log(f"{Color.RED}Failed to parse AI response{Color.RESET}")
         log(f"Raw: {response[:500]}")
@@ -1405,6 +2165,12 @@ IMPORTANT:
         # Clean markdown formatting for better terminal display
         clean_message = clean_markdown_formatting(message)
         log(f"{color}🤖 {clean_message}{Color.RESET}")
+
+        # Create history block for ASK mode responses too
+        create_history_block(user_prompt, message)
+
+        # Save state
+        save_state()
         return
     else:
         color = Color.WHITE
@@ -1440,7 +2206,7 @@ Provide a one-line summary in the same language as the user, focusing on:
 Keep it extremely brief (max 15 words)."""
 
     messages = [{"role": "user", "content": summary_prompt}]
-    response = call_deepseek(messages)
+    response = call_api(messages)
 
     if response:
         try:
@@ -1490,12 +2256,14 @@ def create_history_block(user_prompt, ai_message):
     # Get AI summary of the block
     summary = summarize_block(block_text)
 
-    # Create history block
+    # Create history block with mode and model information
     history_block = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         "user_prompt": user_prompt,
         "ai_plan": ai_message,
         "summary": summary,
+        "mode": AGENT_MODE,
+        "model": AGENT_MODEL,
     }
 
     history_blocks.append(history_block)
@@ -1549,6 +2317,8 @@ def main():
         CURRENT_PROVIDER, \
         HISTORY_VIEWER_ACTIVE, \
         SELECTED_HISTORY_INDEX, \
+        MODEL_SELECTOR_ACTIVE, \
+        SELECTED_MODEL_INDEX, \
         API_URL, \
         API_KEY
 
@@ -1570,13 +2340,120 @@ def main():
     # Load previous session and history
     load_state()
 
+    # Load config and set correct provider/model based on enabled providers
+    config = load_provider_config()
+    providers = config.get("providers", {})
+
+    # Find the first enabled provider and its first enabled model
+    enabled_providers = [
+        name
+        for name, provider_config in providers.items()
+        if provider_config.get("enabled", False)
+    ]
+
+    if enabled_providers:
+        # Use the first enabled provider
+        CURRENT_PROVIDER = enabled_providers[0]
+        provider_config = providers.get(CURRENT_PROVIDER, {})
+
+        # Find first enabled model for this provider
+        models = provider_config.get("models", [])
+        disabled_models = provider_config.get("disabled_models", [])
+        enabled_models = [m for m in models if m not in disabled_models]
+
+        if enabled_models:
+            AGENT_MODEL = enabled_models[0]
+        else:
+            # Fallback to first model if all are disabled (shouldn't happen due to validation)
+            AGENT_MODEL = models[0] if models else "unknown-model"
+
+    # Update API configuration based on selected provider
+    provider_config = providers.get(CURRENT_PROVIDER, {})
+    API_URL = provider_config.get("endpoint", "")
+    API_KEY = provider_config.get("api_key", "")
+
+    # Set up signal handler to restore terminal on exit
+    def signal_handler(sig, frame):
+        # Restore terminal settings
+        fd = sys.stdin.fileno()
+        if hasattr(main, "original_termios"):
+            termios.tcsetattr(fd, termios.TCSADRAIN, main.original_termios)
+        print("\n\n👋 Exiting...")
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+
+    # Save original terminal settings
+    fd = sys.stdin.fileno()
+    main.original_termios = termios.tcgetattr(fd)
+
+    # Load previous session and history
+    load_state()
+
+    # Load config and set correct provider/model based on enabled providers
+    config = load_provider_config()
+    providers = config.get("providers", {})
+
+    # Find the first enabled provider and its first enabled model
+    enabled_providers = [
+        name
+        for name, provider_config in providers.items()
+        if provider_config.get("enabled", False)
+    ]
+
+    if enabled_providers:
+        # Use the first enabled provider
+        CURRENT_PROVIDER = enabled_providers[0]
+        provider_config = providers.get(CURRENT_PROVIDER, {})
+
+        # Find first enabled model for this provider
+        models = provider_config.get("models", [])
+        disabled_models = provider_config.get("disabled_models", [])
+        enabled_models = [m for m in models if m not in disabled_models]
+
+        if enabled_models:
+            AGENT_MODEL = enabled_models[0]
+        else:
+            # Fallback to first model if all are disabled (shouldn't happen due to validation)
+            AGENT_MODEL = models[0] if models else "unknown-model"
+
+        # Update API configuration based on selected provider
+        API_URL = provider_config.get("endpoint", "")
+        API_KEY = provider_config.get("api_key", "")
+    else:
+        # No enabled providers, use defaults
+        CURRENT_PROVIDER = "DeepSeek"
+        AGENT_MODEL = "deepseek-chat"
+        API_URL = ""
+        API_KEY = ""
+
     # Create config.json if it doesn't exist
-    if not os.path.exists("config.json"):
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(script_dir, "config.json")
+    if not os.path.exists(config_path):
         default_config = {
             "providers": {
-                "DeepSeek": {"enabled": False, "api_key": ""},
-                "ChatGPT": {"enabled": False, "api_key": ""},
-                "Claude": {"enabled": False, "api_key": ""},
+                "DeepSeek": {
+                    "enabled": False,
+                    "api_key": "",
+                    "endpoint": "https://api.deepseek.com/v1/chat/completions",
+                    "models": [],
+                    "disabled_models": [],
+                },
+                "ChatGPT": {
+                    "enabled": False,
+                    "api_key": "",
+                    "endpoint": "https://api.openai.com/v1/chat/completions",
+                    "models": [],
+                    "disabled_models": [],
+                },
+                "Claude": {
+                    "enabled": False,
+                    "api_key": "",
+                    "endpoint": "https://api.anthropic.com/v1/messages",
+                    "models": [],
+                    "disabled_models": [],
+                },
             }
         }
         save_provider_config(default_config)
@@ -1586,12 +2463,7 @@ def main():
     providers = config.get("providers", {})
     has_api_key = any(provider.get("api_key", "") for provider in providers.values())
 
-    # Initialize API configuration based on current provider
-    global API_URL, API_KEY
-    API_URL = PROVIDER_ENDPOINTS.get(
-        CURRENT_PROVIDER, "https://api.deepseek.com/v1/chat/completions"
-    )
-    API_KEY = providers.get(CURRENT_PROVIDER, {}).get("api_key", "")
+    # API configuration is already set from startup initialization
 
     # If no API key is set, force user to providers menu
     if not has_api_key:
@@ -1704,7 +2576,7 @@ def main():
 
             # Check for model switch command (including Ctrl+T)
             if user_input.strip().lower() in ["t", "\\t", "ctrl+t", "ctrl-t"]:
-                # Cycle through all models from all enabled providers
+                # Always load latest config to ensure we have the most recent state
                 config = load_provider_config()
                 providers = config.get("providers", {})
 
@@ -1712,44 +2584,52 @@ def main():
                 all_models = []
                 for provider_name, provider_config in providers.items():
                     if provider_config.get("enabled", False):
-                        if provider_name == "DeepSeek":
-                            models = DEEPSEEK_MODELS
-                        elif provider_name == "ChatGPT":
-                            models = OPENAI_MODELS
-                        elif provider_name == "Claude":
-                            models = ANTHROPIC_MODELS
-                        else:
-                            models = []
+                        # Use models from config.json, fallback to empty dict
+                        models_config = provider_config.get("models", {})
+                        for model_name, model_config in models_config.items():
+                            # Only include models that are enabled
+                            if model_config.get("enabled", True):
+                                all_models.append(f"{provider_name}: {model_name}")
 
-                        for model in models:
-                            all_models.append((provider_name, model))
-
-                # If no enabled providers, use DeepSeek as fallback
+                # If no enabled providers, no models available
                 if not all_models:
-                    all_models = [("DeepSeek", model) for model in DEEPSEEK_MODELS]
+                    all_models = [("NoProvider", "no-models-available")]
 
-                # Find current model in the list
+                # Find current model in the list - use the actual current provider from config
                 current_model_index = -1
-                for i, (provider, model) in enumerate(all_models):
-                    if provider == CURRENT_PROVIDER and model == AGENT_MODEL:
-                        current_model_index = i
-                        break
+                for i, provider_model_str in enumerate(all_models):
+                    if ":" in provider_model_str:
+                        provider, model = provider_model_str.split(": ", 1)
+                        if provider == CURRENT_PROVIDER and model == AGENT_MODEL:
+                            current_model_index = i
+                            break
 
-                # If current model not found, start from first
+                # If current model not found, set the first model in all_models as active
                 if current_model_index == -1:
-                    current_model_index = 0
+                    if all_models:
+                        # Set the first model in the available list as active
+                        CURRENT_PROVIDER, AGENT_MODEL = all_models[0]
+                        current_model_index = 0
+                    else:
+                        current_model_index = 0
                 else:
                     # Cycle to next model
                     current_model_index = (current_model_index + 1) % len(all_models)
 
                 # Set new provider and model
-                CURRENT_PROVIDER, AGENT_MODEL = all_models[current_model_index]
+                provider_model_str = all_models[current_model_index]
+                if ":" in provider_model_str:
+                    CURRENT_PROVIDER, AGENT_MODEL = provider_model_str.split(": ", 1)
+                else:
+                    # Fallback for "NoProvider: no-models-available"
+                    CURRENT_PROVIDER = "NoProvider"
+                    AGENT_MODEL = "no-models-available"
 
                 # Update API configuration
-                API_URL = PROVIDER_ENDPOINTS.get(
-                    CURRENT_PROVIDER, "https://api.deepseek.com/v1/chat/completions"
-                )
-                API_KEY = providers.get(CURRENT_PROVIDER, {}).get("api_key", "")
+                config = load_provider_config()
+                provider_config = config.get("providers", {}).get(CURRENT_PROVIDER, {})
+                API_URL = provider_config.get("endpoint", "")
+                API_KEY = provider_config.get("api_key", "")
 
                 save_state()
 
