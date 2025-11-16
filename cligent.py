@@ -22,14 +22,14 @@ Usage:
     ./cligent.py [prompt]
 
 Comment:
-	AI is lovely; But nobody loves like Jesus.
-	All glory to the one true God, full of patience and mercy.
+        AI is lovely; But nobody loves like Jesus.
+        All glory to the one true God, full of patience and mercy.
 
-	Matt. 5:3
-	Blessed are the poor in spirit: for theirs is the kingdom of heaven.
+        Matt. 5:3
+        Blessed are the poor in spirit: for theirs is the kingdom of heaven.
 
-	Rom. 10:13
-	For whosoever shall call upon the name of the Lord shall be saved.
+        Rom. 10:13
+        For whosoever shall call upon the name of the Lord shall be saved.
 """
 
 import json
@@ -1362,6 +1362,17 @@ def show_model_selector(provider_name, provider_config, config):
                     disabled_models.remove(selected_model)
                 else:
                     disabled_models.append(selected_model)
+
+                # Update the model configuration and save immediately
+                for model_name in models:
+                    if model_name in models_config:
+                        models_config[model_name]["enabled"] = (
+                            model_name not in disabled_models
+                        )
+
+                provider_config["models"] = models_config
+                config["providers"][provider_name] = provider_config
+                save_provider_config(config)
         elif ch == "\r":  # ENTER - Edit max_tokens
             selected_model = models[SELECTED_MODEL_INDEX]
             current_config = models_config.get(selected_model, {})
