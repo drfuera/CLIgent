@@ -1994,11 +1994,13 @@ Use the terminal history and previous attempts above to understand the context."
     if not response or stop_requested:
         return False
 
-    # Parse response
+    # Parse response - first extract from markdown code blocks if needed
     try:
-        issue_data = json.loads(response)
+        clean_response = extract_json_from_markdown(response)
+        issue_data = json.loads(clean_response)
     except:
         log(f"{Color.RED}Failed to parse AI response for error handling{Color.RESET}")
+        log(f"Raw response: {response}")
         return False
 
     # Print issue message
